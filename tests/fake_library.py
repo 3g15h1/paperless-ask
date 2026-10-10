@@ -39,7 +39,24 @@ DOCS = [
      "content": f"City Water Department\nAmount due $ 61.20\nDue by {SOON_US}"},
     {"id": 10, "title": "Photo of a medical form", "created": "2025-04-01T00:00:00Z", "correspondent": None,
      "document_type": None, "tags": [], "modified": "2025-04-02T00:00:00Z", "content": ""},  # OCR found no text
+    {"id": 11, "title": "Riverside Apartments agreement", "created": "2025-06-01T00:00:00Z", "correspondent": None,
+     "document_type": None, "tags": [], "modified": "2025-06-02T00:00:00Z",
+     "content": "Riverside Apartments\nResidential Lease Agreement\nTenant agrees to a monthly payment of $ 1,450.00\n"
+                "Landlord allows one cat. Term 06/01/2025 to 05/31/2026"},
 ]
+
+# A tiny "embedding model": words that mean the same thing share a dimension
+CONCEPTS = [{"lease", "rent", "rental", "apartment", "apartments", "landlord", "tenant", "housing"},
+            {"insurance", "policy", "coverage", "insurer", "insured"},
+            {"medical", "clinic", "patient", "doctor", "pharmacy", "prescription", "health"},
+            {"phone", "gadget", "electronics", "device"},
+            {"electric", "power", "utility", "water", "energy"}]
+
+
+def fake_embedding(text):
+    words = [w.strip(".,?!$:").lower() for w in text.split()]
+    vec = [float(sum(w in c for w in words)) for c in CONCEPTS]
+    return vec + [0.05]  # never all zero
 NAMES = {
     "correspondents": [{"id": 1, "name": "Gadget Store"}, {"id": 2, "name": "Example Mutual"},
                        {"id": 3, "name": "AcmePower"}],
@@ -67,6 +84,7 @@ CARDS = {
     8: card("bill", "finance", "Northwind Card Services", "250.00", [("due", SOON.isoformat())],
             [("account", "4000123412341234")]),
     9: card("bill", "utilities", "Imaginary Vendor", "61.20", [("due", SOON.isoformat())]),
+    11: card("contract", "home", "Riverside Apartments", "$1,450.00", [("effective", "2025-06-01"), ("expires", "2026-05-31")]),
 }
 TOKEN = "0123456789abcdef0123456789abcdef01234567"
 
@@ -78,6 +96,7 @@ def page(results):
 class Fake:
     def __init__(self, answer="Your car insurance expires on October 22, 2026 [1].", ollama_up=True):
         self.answer, self.ollama_up, self.chats, self.extractions = answer, ollama_up, [], []
+        self.embed_model_installed, self.embeds = True, []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         host, path = request.url.host, request.url.path
@@ -101,13 +120,19 @@ class Fake:
         if host == "ollama.test":
             if not self.ollama_up:
                 raise httpx.ConnectError("ollama down", request=request)
+            if path == "/api/embed":
+                body = json.loads(request.content)
+                if not self.embed_model_installed:
+                    return httpx.Response(404, json={"error": f"model \"{body['model']}\" not found, try pulling it first"})
+                self.embeds.append(body)
+                return httpx.Response(200, json={"embeddings": [fake_embedding(t) for t in body["input"]]})
             if path == "/api/ps":
                 return httpx.Response(200, json={"models": [{"name": "qwen2.5:3b-instruct"}]})
             if path == "/api/chat" and json.loads(request.content).get("format"):
                 body = json.loads(request.content)
                 self.extractions.append(body)
                 text = body["messages"][1]["content"]
-                doc = next(d for d in DOCS if " ".join(d["content"].split())[:60] in text)
+                doc = next(d for d in DOCS if d["content"] and " ".join(d["content"].split()) in text)
                 return httpx.Response(200, json={"message": {"content": json.dumps(CARDS[doc["id"]])}, "done": True})
             if path == "/api/chat":
                 self.chats.append(json.loads(request.content))

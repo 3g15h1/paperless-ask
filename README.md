@@ -36,9 +36,22 @@ leave your network. It runs fine on a CPU-only home server.
 - **Totals.** *"How much did I spend on medical in 2025?"* adds up the fact cards in code (never
   by the model). You get the total, an itemised list with citations, and the likely duplicates it
   left out, such as a receipt and a statement for the same charge.
+- **Follow-up questions.** After "When does my car insurance expire?" you can ask "and last
+  year's?" or "and the policy number?". A chip under the ask box shows what you're following up
+  on, and × starts a new topic.
+- **Search by meaning.** An Ollama embedding model (`nomic-embed-text`) also finds documents
+  that use different words, e.g. "grass cutting" for a lawn service invoice. It only re-ranks:
+  if a word appears in no document, you still get an honest "I couldn't find …", with the
+  closest documents in meaning listed and an "Ask the AI" button.
+- **Ask about this document.** Each source card has a button that scopes the next questions to
+  that one document. The AI then reads more of it.
+- **Answer feedback.** 👍/👎 under every answer, with an optional comment. `/feedback` lists the
+  answers marked wrong, what they cited, and the words that matched nothing, which is a quick way
+  to find synonyms worth adding.
 - **Read-only.** It only needs a Paperless API token for a view-only user.
 - `http://<host>/?q=…` asks a question straight away, which is handy for phone shortcuts.
-  `POST /api/ask` gives scripts a JSON API (`"full": true` skips instant answers).
+  `POST /api/ask` gives scripts a JSON API. It accepts `"full": true` to skip instant answers,
+`"prev": {"q", "a"}` for follow-ups, and `"doc": <id>` to ask about one document.
 
 ## How it works
 
@@ -92,6 +105,7 @@ cd paperless-ask
 cp .env.example .env          # set PAPERLESS_URL and PAPERLESS_TOKEN
 docker compose up -d
 docker compose exec ollama ollama pull qwen2.5:3b-instruct   # first run only
+docker compose exec ollama ollama pull nomic-embed-text      # for search by meaning (optional)
 ```
 
 Then open `http://<your-server>:8000`. The compose file runs both Paperless Ask and Ollama.
@@ -151,6 +165,8 @@ with explanations.
 | `FACTS_HOURS` | any idle time | Only extract in these hours, e.g. `1-6`. Useful when Ollama is shared |
 | `DATA_DIR` | `./data` (Docker `/data`, systemd `/var/lib/paperless-ask`) | Where fact cards are saved |
 | `REMINDER_DAYS` / `ALERT_DAYS` / `DONE_TAGS` | `60` / `14,3,1,0` / `paid` | "Coming up" window, alert days, tags meaning "already paid" |
+| `EMBED_MODEL` | `nomic-embed-text` | Ollama embedding model for search by meaning; `off` to disable |
+| `FEEDBACK` | `on` | 👍/👎 on answers and the `/feedback` review page |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Where to listen |
 
 **Tips**
@@ -166,6 +182,9 @@ with explanations.
   at `/api/facts`. After that, only new and changed documents are read. Totals and instant
   answers cover the documents analysed so far, and a total tells you if any in its period are
   still waiting.
+- **Ollama needs room for two models** (chat and embedding). Ollama keeps up to 3 loaded by
+  default. If you've set `OLLAMA_MAX_LOADED_MODELS=1`, raise it to 2, or every search by meaning
+  will unload the chat model. The embedding model needs about 400 MB of RAM.
 - **One model at a time.** Ollama on a small machine usually keeps one model loaded. If
   Paperless's own AI features use Ollama too, point both at the same model to avoid reloads.
 
@@ -191,6 +210,8 @@ with explanations.
 | `GET /api/upcoming?days=60` | Upcoming due/expiry dates (`items`) and today's `alerts` |
 | `GET /calendar.ics` | The same dates as a subscribable calendar, with alarms |
 | `GET /api/facts` | Every fact card, including what the checks dropped |
+| `POST /api/feedback` `{"id", "q", "vote": "up"/"down", "comment"?, …}` | Records feedback (a repeated id updates it) |
+| `GET /api/feedback`, `GET /feedback` | Feedback as JSON, and the review page |
 | `GET /healthz` | 200 once the library is loaded, else 503 |
 | `GET /thumb/<id>` | Document thumbnail, proxied from Paperless |
 

@@ -2,6 +2,7 @@
 #   cp .env.example .env    # set PAPERLESS_URL and PAPERLESS_TOKEN
 #   docker compose up -d
 #   docker compose exec ollama ollama pull qwen2.5:3b-instruct   # first run only
+#   docker compose exec ollama ollama pull nomic-embed-text      # search by meaning (optional)
 # Already running Ollama elsewhere? Delete the `ollama` service and set OLLAMA_URL in .env.
 services:
   paperless-ask:
@@ -14,7 +15,7 @@ services:
     ports:
       - "${PORT:-8000}:8000"
     volumes:
-      - paperless-ask-data:/data   # fact cards
+      - paperless-ask-data:/data   # fact cards, search index, feedback
     depends_on:
       - ollama
 

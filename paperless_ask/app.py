@@ -30,7 +30,7 @@ import httpx
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
-from . import __version__, facts, reminders, totals
+from . import __version__, embeddings, facts, feedback, followups, reminders, totals
 from .textutil import (ANSWER_DATE_RE, DATE_RE, MONEY_RE, MONTH_NAMES, MONTHS, date_variants, match_to_date,
                        num_variants)
 
@@ -75,6 +75,17 @@ FACTS_MAX_CHARS = _env_int("FACTS_MAX_CHARS", 4000)
 REMINDER_DAYS = _env_int("REMINDER_DAYS", 60)
 ALERT_DAYS = sorted({int(x) for x in os.environ.get("ALERT_DAYS", "14,3,1,0").split(",") if x.strip()}, reverse=True)
 DONE_TAGS = [t.strip() for t in os.environ.get("DONE_TAGS", "paid").split(",") if t.strip()]
+# Search by meaning (an Ollama embedding model) and answer feedback
+EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text").strip()
+EMBED_ON = EMBED_MODEL.lower() not in ("", "0", "off", "false", "no")
+EMBED_MAX_CHUNKS = _env_int("EMBED_MAX_CHUNKS", 40)
+# Similarity scores of real matches and of unrelated questions overlap (see the design doc), so
+# meaning only re-ranks: documents within SEMANTIC_BAND of the best match (and above a per-model
+# floor) get a boost. It never overrules "I couldn't find X" on its own.
+_SEMANTIC_FLOOR = {"all-minilm": 0.25, "nomic-embed-text": 0.45}
+SEMANTIC_MIN = float(os.environ.get("SEMANTIC_MIN") or _SEMANTIC_FLOOR.get(EMBED_MODEL.split(":")[0], 0.4))
+SEMANTIC_BAND = float(os.environ.get("SEMANTIC_BAND") or 0.06)
+FEEDBACK_ON = os.environ.get("FEEDBACK", "on").lower() not in ("0", "off", "false", "no")
 STATIC_DIR = Path(__file__).with_name("static")
 
 # ---------------------------------------------------------------- text utils
@@ -87,7 +98,7 @@ myself no nor not now of off on once only or other our ours out over own same sh
 such than that the their them then there these they this those through to too under until up very
 was we were what whats when where which while who whom why will with would you your yours
 yourself show find tell give list see look please much many anything something thing things
-document documents doc docs paperless file files filed paper papers ive im what's i'm
+document documents doc docs paperless file files filed paper papers ive im what's i'm per each every
 """.split())
 
 # Query word -> related words worth searching for too (weighted lower than the word itself).
@@ -210,7 +221,13 @@ def wants_month(question: str) -> list[int]:
 
 
 def wants_year(question: str) -> list[int]:
-    return sorted({int(y) for y in re.findall(r"\b(19[5-9]\d|20[0-4]\d)\b", question)})
+    years = {int(y) for y in re.findall(r"\b(19[5-9]\d|20[0-4]\d)\b", question)}
+    q = question.lower()
+    if re.search(r"\bthis year\b", q):
+        years.add(date.today().year)
+    if re.search(r"\blast year\b", q):
+        years.add(date.today().year - 1)
+    return sorted(years)
 
 
 # ---------------------------------------------------------------- library cache
@@ -461,8 +478,12 @@ async def paperless_fulltext(client, terms: list[str]) -> list[int]:
         return []
 
 
-async def retrieve(client, question: str) -> dict:
+async def retrieve(client, question: str, older: bool = False, doc_id: int | None = None) -> dict:
+    """Rank the library for `question` (for a follow-up: the combined question). With doc_id, the
+    answer comes from that one document. older=True turns off the "latest version only" handling."""
     t0 = time.monotonic()
+    if doc_id is not None and doc_id in LIB.docs:
+        return scoped_retrieve(question, LIB.docs[doc_id], t0)
     terms, raw = query_terms(question)
     months, years = wants_month(question), wants_year(question)
     date_words = {str(y) for y in years}
@@ -480,6 +501,8 @@ async def retrieve(client, question: str) -> dict:
         if t in date_words:
             weights.setdefault(t, 0.5)
     pl_ids = await paperless_fulltext(client, content_terms)
+    sem = await semantic_scores(question) if content_terms else {}
+    sem_best = max(sem.values(), default=0.0)
 
     scores = {}
     for doc in LIB.docs.values():
@@ -498,7 +521,14 @@ async def retrieve(client, question: str) -> dict:
     for rank, i in enumerate(pl_ids):
         if i in LIB.docs:
             final[i] = final.get(i, 0) + 0.3 / (1 + rank)
-    if RECENT_Q.search(question):
+    by_meaning = [(i, s) for i, s in sorted(sem.items(), key=lambda kv: -kv[1])[:3]
+                  if s >= SEMANTIC_MIN and s >= sem_best - SEMANTIC_BAND]
+    for i, sim in by_meaning:
+        # within the band, differences are noise between documents on the same topic: the same boost for
+        # all (plus a tie-break), so word matches and recency still decide their order
+        final[i] = final.get(i, 0) + 0.3 + 0.05 * (1 - (sem_best - sim) / SEMANTIC_BAND)
+    recent = bool(RECENT_Q.search(question)) and not older
+    if recent:
         for i in final:
             cd = LIB.docs[i].created_date
             if cd:
@@ -508,7 +538,6 @@ async def retrieve(client, question: str) -> dict:
     ranked = [(i, s) for i, s in ranked if s >= max(0.3 * best, 0.12)][:MAX_SOURCES]
 
     sources, llm_docs, seen = [], [], set()
-    recent = bool(RECENT_Q.search(question))
     for n, (i, s) in enumerate(ranked, 1):
         doc = LIB.docs[i]
         wins = best_windows(doc, weights, question, k=3 if n == 1 else 1, width=380 if n == 1 else 320)
@@ -526,9 +555,29 @@ async def retrieve(client, question: str) -> dict:
     return {
         "question": question, "sources": with_categories(sources), "words": raw,
         "llm_docs": [] if refuse or listing else llm_docs,
+        "_candidates": llm_docs,  # what the model would read if asked anyway (full=1)
         "highlight": sorted(highlight, key=len, reverse=True)[:20], "months": months, "years": years,
-        "missing": missing, "refused": refuse, "listing": listing and not refuse,
-        "extractive": extractive_answer(question, sources, llm_docs, missing if refuse else [], listing),
+        "missing": missing, "refused": refuse, "listing": listing and not refuse, "scoped": None,
+        "semantic": {str(i): round(s, 3) for i, s in by_meaning},
+        "extractive": extractive_answer(question, sources, llm_docs, missing if refuse else [], listing,
+                                        by_meaning=bool(by_meaning)),
+        "ms": int((time.monotonic() - t0) * 1000),
+    }
+
+
+def scoped_retrieve(question: str, doc: Doc, t0: float) -> dict:
+    """"Ask about this document": the only source is `doc`, and the model reads more of it."""
+    terms, raw = query_terms(question)
+    weights, _ = expand_terms(terms)
+    wins = best_windows(doc, weights, question, k=4, width=420)
+    sources = [doc.card(1, wins[0] if wins else doc.headline, 1.0)]
+    llm_docs = [(1, doc, wins)]
+    return {
+        "question": question, "sources": with_categories(sources), "words": raw, "llm_docs": llm_docs,
+        "highlight": sorted({w for w in raw if len(w) > 2}, key=len, reverse=True)[:20],
+        "months": wants_month(question), "years": wants_year(question), "missing": [], "refused": False,
+        "listing": False, "scoped": doc.id, "semantic": {}, "_candidates": llm_docs,
+        "extractive": extractive_answer(question, sources, llm_docs, []),
         "ms": int((time.monotonic() - t0) * 1000),
     }
 
@@ -543,7 +592,8 @@ def _quote_list(words: list[str]) -> str:
     return q[0] if len(q) == 1 else ", ".join(q[:-1]) + " or " + q[-1]
 
 
-def extractive_answer(question: str, sources: list, llm_docs: list, missing: list[str], listing: bool = False) -> dict:
+def extractive_answer(question: str, sources: list, llm_docs: list, missing: list[str], listing: bool = False,
+                      by_meaning: bool = False) -> dict:
     if listing and sources and not missing:
         strong = [s for s in sources if s["score"] >= 0.45 * sources[0]["score"]]
         items = [f"“{s['title']}”" + (f" ({s['created']})" if s["created"] else "") + f" [{s['n']}]"
@@ -553,7 +603,9 @@ def extractive_answer(question: str, sources: list, llm_docs: list, missing: lis
         return {"text": f"I found {len(items)} matching documents: " + "; ".join(items) + ".", "facts": []}
     if missing:
         text = f"I couldn't find anything mentioning {_quote_list(missing)} in your {len(LIB.docs)} documents."
-        if sources:
+        if sources and by_meaning:
+            text += " The documents below are the closest in meaning, but none of them uses that word."
+        elif sources:
             text += " These are the closest matches, but they probably aren't what you're looking for."
         return {"text": text, "facts": []}
     if not sources:
@@ -589,7 +641,8 @@ Rules:
 - The text is OCR output and may contain errors; ignore garbled fragments."""
 
 
-def build_prompt(question: str, llm_docs: list, missing: list[str] = ()) -> str:
+def build_prompt(question: str, llm_docs: list, missing: list[str] = (), context: dict | None = None,
+                 scoped: bool = False) -> str:
     parts = []
     for n, doc, wins in llm_docs:
         meta = [f"title: {doc.title}"]
@@ -600,13 +653,18 @@ def build_prompt(question: str, llm_docs: list, missing: list[str] = ()) -> str:
         if doc.correspondent:
             meta.append(f"from: {doc.correspondent}")
         flat = " ".join(doc.content.split())
-        if len(flat) <= (1400 if n == llm_docs[0][0] else 500):
+        if len(flat) <= (3500 if scoped else 1400 if n == llm_docs[0][0] else 500):
             body = [flat]
         else:
             body = [f"(beginning) {doc.headline}"] + [f"... {w} ..." for w in wins if w[:60] not in doc.headline]
         parts.append(f"[{n}] " + " | ".join(meta) + "\n" + "\n".join(body))
     today = date.today().strftime("%B %d, %Y")
     note = f"\nNote: no document mentions {_quote_list(list(missing))}.\n" if missing else ""
+    if context:
+        prev_a = " ".join(re.sub(r"\[\d+\]", "", context.get("a") or "").split())[:300]
+        note += (f"\nEarlier in this conversation the user asked: {context['q']}\n"
+                 + (f"and was told: {prev_a}\n" if prev_a else "")
+                 + "The new question follows on from that.\n")
     return (f"Today is {today}.\n\nSources:\n\n" + "\n\n".join(parts) + f"\n{note}\nQuestion: {question}\n\n"
             "Reply with just the answer in 1-3 sentences, using only the sources above. "
             "End each sentence with the number of the source it came from in square brackets, e.g. [1].")
@@ -687,11 +745,12 @@ def ollama_options(**opts) -> dict:
     return opts
 
 
-async def llm_stream(client, question: str, llm_docs: list, missing: list[str] = ()):
+async def llm_stream(client, question: str, llm_docs: list, missing: list[str] = (), context: dict | None = None,
+                     scoped: bool = False):
     body = {
         "model": OLLAMA_MODEL, "stream": True, "keep_alive": OLLAMA_KEEP_ALIVE,
         "messages": [{"role": "system", "content": SYSTEM_PROMPT},
-                     {"role": "user", "content": build_prompt(question, llm_docs, missing)}],
+                     {"role": "user", "content": build_prompt(question, llm_docs, missing, context, scoped)}],
         "options": ollama_options(temperature=0.1, num_ctx=4096, num_predict=220),
     }
     async with LLM_LOCK:
@@ -740,6 +799,8 @@ async def warm_model(client):
 STATE = {"last_ask": 0.0}
 HTTP_TRANSPORT = None  # tests swap in an httpx.MockTransport
 STORE: facts.FactStore | None = None
+EMB: embeddings.EmbeddingIndex | None = None
+FEEDBACK_LOG: feedback.FeedbackLog | None = None
 
 
 def card_for(doc) -> dict | None:
@@ -817,6 +878,59 @@ async def facts_worker():
             log.warning("fact extraction failed for #%d (%s): %s", doc.id, type(e).__name__, e)
 
 
+async def semantic_scores(question: str) -> dict[int, float]:
+    """Best-passage similarity per document; {} when search by meaning is off or unavailable."""
+    if not EMBED_ON or EMB is None or not EMB.docs or time.time() < STATE.get("embed_retry", 0):
+        return {}
+    try:
+        q = await embeddings.embed(STATE["ol"], OLLAMA_URL, EMBED_MODEL, [question], timeout=3)
+    except Exception as e:
+        log.info("search by meaning skipped: %s", e)
+        return {}
+    return EMB.scores(q[0], EMBED_MODEL, {i: d.modified for i, d in LIB.docs.items()})
+
+
+async def embed_worker():
+    """Embed new and changed documents (cheap: a small model, passages of ~600 characters)."""
+    while True:
+        await asyncio.sleep(STATE.get("facts_poll", 20))
+        if not EMBED_ON or not LIB.docs or time.time() < STATE.get("embed_retry", 0):
+            continue
+        if time.time() - STATE["last_ask"] < STATE.get("facts_idle", 120) or LLM_LOCK.locked():
+            continue
+        EMB.prune(LIB.docs.keys())
+        todo = [d for d in LIB.docs.values() if d.content.strip() and EMB.stale(d.id, d.modified, EMBED_MODEL)]
+        if not todo:
+            continue
+        t0, done = time.monotonic(), 0
+        try:
+            for doc in sorted(todo, key=lambda d: (d.modified, d.id), reverse=True)[:10]:
+                vecs = await embeddings.embed(STATE["ol"], OLLAMA_URL, EMBED_MODEL,
+                                              embeddings.passages(doc.content, max_chunks=EMBED_MAX_CHUNKS))
+                EMB.put(doc.id, vecs, doc.modified, EMBED_MODEL, save=False)
+                done += 1
+        except asyncio.CancelledError:
+            raise
+        except embeddings.ModelMissing as e:
+            log.warning("search by meaning is off for now: %s", e)
+            STATE["embed_retry"] = time.time() + 1800
+        except Exception as e:
+            log.warning("embedding failed (%s): %s; retrying in 10 min", type(e).__name__, e)
+            STATE["embed_retry"] = time.time() + 600
+        if done:
+            EMB.save()
+            log.info("embedded %d documents in %.1fs (%d to go)", done, time.monotonic() - t0, len(todo) - done)
+
+
+def embed_status() -> dict:
+    if not EMBED_ON:
+        return {"enabled": False}
+    with_text = [d for d in LIB.docs.values() if d.content.strip()]
+    done = sum(1 for d in with_text if EMB is not None and not EMB.stale(d.id, d.modified, EMBED_MODEL))
+    return {"enabled": True, "model": EMBED_MODEL, "indexed": done, "pending": len(with_text) - done,
+            "available": time.time() >= STATE.get("embed_retry", 0)}
+
+
 def facts_status() -> dict:
     with_text = [d for d in LIB.docs.values() if d.content.strip()]
     done = sum(1 for d in with_text if card_for(d))
@@ -835,27 +949,58 @@ def _long_date(iso: str) -> str:
     return f"{d:%B} {d.day}, {d.year}"
 
 
-def fact_answer(question: str, r: dict) -> str | None:
+_INTENT_WORDS = {stem(w) for w in """expire expires expired expiration expiry renew renewal valid due pay payment
+number numbers no policy account invoice order member vin reference confirmation claim serial plate tracking customer
+group case cost price total amount paid owe much""".split()}
+
+
+def subject_terms(question: str) -> list[str]:
+    """What the question is about ("car insurance", "passport"), without the words that say what's wanted."""
+    terms, _ = query_terms(question)
+    return [t for t in terms if t not in GENERIC and t not in _INTENT_WORDS and not t.isdigit() and t not in MONTHS]
+
+
+def card_is_about(card: dict, doc, subject: list[str]) -> bool:
+    about = " ".join([card.get("vendor") or "", card.get("kind") or "", card.get("category") or "",
+                      card.get("summary") or "", doc.title.replace("_", " "), doc.correspondent or "",
+                      " ".join(i["label"] for i in card.get("ids", []))])
+    words = set(tokenize(about))
+    for t in subject:
+        options = {t} | {stem(e) for e in EXPANSIONS.get(t, [])}
+        if any(w == o or (len(o) >= 4 and w.startswith(o)) for o in options for w in words):
+            return True
+    return False
+
+
+def fact_intent(q: str):
+    if re.search(r"\b(expir\w*|renew\w*|valid (until|through|thru))\b", q):
+        return ("date", "expires")
+    if re.search(r"\bdue\b|\bpay(ment)? by\b", q) and DATE_Q.search(q):
+        return ("date", "due")
+    if NUMBER_Q.search(q) and not AMOUNT_Q.search(q):
+        return ("id", [w for w in _ID_WORDS if re.search(rf"\b{w}", q)])
+    if re.search(r"\b(how much|cost|price|total|amount|paid|owe)\b", q):
+        return ("total", None)
+    return None
+
+
+def fact_answer(question: str, r: dict, own: str | None = None) -> str | None:
     """Answer straight from fact cards when the question asks for one labelled fact and the documents
-    the model would have read agree on a single value. None means: let the model answer."""
+    the model would have read agree on a single value. None means: let the model answer.
+    own: a follow-up's own words, whose intent ("and the policy number?") wins over the combined question."""
     if not r["llm_docs"] or r["refused"] or r["listing"]:
         return None
-    q = question.lower()
-    if re.search(r"\b(expir\w*|renew\w*|valid (until|through|thru))\b", q):
-        want = ("date", "expires")
-    elif re.search(r"\bdue\b|\bpay(ment)? by\b", q) and DATE_Q.search(q):
-        want = ("date", "due")
-    elif NUMBER_Q.search(q) and not AMOUNT_Q.search(q):
-        want = ("id", [w for w in _ID_WORDS if re.search(rf"\b{w}", q)])
-    elif re.search(r"\b(how much|cost|price|total|amount|paid|owe)\b", q):
-        want = ("total", None)
-    else:
+    want = fact_intent((own if own is not None else question).lower())
+    if want is None:
         return None
+    subject = subject_terms(own if own is not None else question)
     found = {}  # value -> (n, doc, card, label)
     for n, doc, _ in r["llm_docs"]:
         card = card_for(doc)
         if not card:
             return None  # a document the model would read has no card yet
+        if subject and not card_is_about(card, doc, subject):
+            continue  # e.g. an expiry date on a car lease that merely mentions a passport
         name = card.get("vendor") or doc.title
         if want[0] == "date":
             for d in card["dates"]:
@@ -913,13 +1058,15 @@ def total_answer(question: str, r: dict) -> bool:
     return True
 
 
-def special_answer(question: str, r: dict, full: bool) -> str | None:
-    """'total' or 'facts' when the question was answered without the model (r is updated), else None."""
+def special_answer(question: str, r: dict, full: bool, own: str | None = None, older: bool = False) -> str | None:
+    """'total' or 'facts' when the question was answered without the model (r is updated), else None.
+    own: a follow-up's own words. older: the question asks about an earlier version ("last year's"),
+    which instant answers (they pick the date still ahead) can't do."""
     if not FACTS_ON or r["refused"]:
         return None
-    if total_answer(question, r):
+    if r["scoped"] is None and total_answer(question, r):
         return "total"
-    if not full and (text := fact_answer(question, r)):
+    if not full and not older and (text := fact_answer(question, r, own)):
         r["extractive"] = {"text": text, "facts": []}
         return "facts"
     return None
@@ -958,15 +1105,20 @@ async def lifespan(_app):
     STATE["pl"] = httpx.AsyncClient(headers={"Authorization": f"Token {read_token()}",
                                              "Accept": "application/json"}, transport=HTTP_TRANSPORT)
     STATE["ol"] = httpx.AsyncClient(transport=HTTP_TRANSPORT)
-    global STORE
+    global STORE, EMB, FEEDBACK_LOG
     STORE = facts.FactStore(DATA_DIR / "facts.json")
+    EMB = embeddings.EmbeddingIndex(DATA_DIR / "embeddings.npz")
+    FEEDBACK_LOG = feedback.FeedbackLog(DATA_DIR / "feedback.jsonl")
     STATE["page"] = render_page()
     STATE["thumbs"] = OrderedDict()
     STATE["started"] = time.time()
     log.info("paperless-ask %s starting: paperless=%s ollama=%s model=%s login=%s facts=%s (%d cards in %s)",
              __version__, PAPERLESS_URL, OLLAMA_URL, OLLAMA_MODEL, "on" if ASK_PASSWORD else "off",
              f"on, hours {FACTS_HOURS or 'any'}" if FACTS_ON else "off", len(STORE.cards), DATA_DIR)
-    tasks = [asyncio.create_task(background()), asyncio.create_task(facts_worker())]
+    log.info("search by meaning: %s; feedback: %s", f"{EMBED_MODEL} ({len(EMB.docs)} documents indexed, "
+             f"floor {SEMANTIC_MIN}, band {SEMANTIC_BAND})" if EMBED_ON else "off", "on" if FEEDBACK_ON else "off")
+    tasks = [asyncio.create_task(background()), asyncio.create_task(facts_worker()),
+             asyncio.create_task(embed_worker())]
     yield
     for t in tasks:
         t.cancel()
@@ -977,7 +1129,7 @@ async def lifespan(_app):
 def render_page() -> str:
     """index.html with the per-install settings the browser needs."""
     page = (STATIC_DIR / "index.html").read_text()
-    config = {"suggestions": SUGGESTIONS, "facts": FACTS_ON, "reminder_days": REMINDER_DAYS}
+    config = {"suggestions": SUGGESTIONS, "facts": FACTS_ON, "reminder_days": REMINDER_DAYS, "feedback": FEEDBACK_ON}
     tag = "<script>window.PAPERLESS_ASK = " + json.dumps(config).replace("</", "<\\/") + ";</script>"
     return page.replace("<!--CONFIG-->", tag, 1)
 
@@ -1028,6 +1180,7 @@ async def healthz():
         "paperless": {"ok": pl_ok and LIB.error is None, "documents": len(LIB.docs), "refreshed": refreshed},
         "llm": ol,
         "facts": facts_status(),
+        "search_by_meaning": embed_status(),
         "uptime_s": int(time.time() - STATE["started"]),
         "version": __version__,
     }
@@ -1044,7 +1197,8 @@ async def stats():
         pass
     ol = await ollama_status(STATE["ol"])
     return {"documents": len(LIB.docs), "refreshed": int(LIB.refreshed_at), "llm": ol["ok"],
-            "model": OLLAMA_MODEL, "paperless": PAPERLESS_LINK_URL, "facts": facts_status()}
+            "model": OLLAMA_MODEL, "paperless": PAPERLESS_LINK_URL, "facts": facts_status(),
+            "search_by_meaning": embed_status()}
 
 
 @app.get("/api/upcoming")
@@ -1076,11 +1230,33 @@ def sse(event: str, data) -> str:
 
 
 def public(r: dict) -> dict:
-    return {k: v for k, v in r.items() if k != "llm_docs"}
+    return {k: v for k, v in r.items() if k not in ("llm_docs", "_candidates")}
+
+
+async def prepare(q: str, prev_q: str | None, prev_a: str | None, doc_id: int | None, full: bool):
+    """Retrieval plus any answer that needs no model. Returns (r, mode, context for the prompt)."""
+    terms, _ = query_terms(q)
+    plan = followups.plan(q, prev_q, len(terms))
+    scope = doc_id if doc_id in LIB.docs else None
+    r = await retrieve(STATE["pl"], plan["search"], older=plan["older"], doc_id=scope)
+    r.update(question=q, context_q=plan["search"], followup=plan["followup"])
+    context = {"q": " ".join((prev_q or "").split())[:500], "a": prev_a or ""} if plan["followup"] else None
+    mode = special_answer(plan["search"], r, full, own=q if plan["followup"] else None, older=plan["older"])
+    if full and r["refused"] and not mode:
+        r["llm_docs"] = r["_candidates"]  # "Ask the AI anyway": the prompt still says the word appears nowhere
+    return r, mode, context
+
+
+def _ask_log(kind: str, q: str, r: dict, mode: str, ms: int) -> None:
+    extra = "".join([f", follow-up of {r['context_q'][:80]!r}" if r["followup"] else "",
+                     f", about #{r['scoped']}" if r["scoped"] is not None else ""])
+    log.info("%s %r -> %s, %d sources, %d ms%s", kind, q[:120], mode, len(r["sources"]), ms, extra)
 
 
 @app.get("/api/ask/stream")
-async def ask_stream(q: str = Query(..., min_length=1, max_length=500), full: bool = False):
+async def ask_stream(q: str = Query(..., min_length=1, max_length=500), full: bool = False,
+                     prev_q: str | None = Query(None, max_length=1000), prev_a: str | None = Query(None, max_length=2000),
+                     doc: int | None = None):
     q = " ".join(q.split())
     STATE["last_ask"] = time.time()
 
@@ -1088,13 +1264,12 @@ async def ask_stream(q: str = Query(..., min_length=1, max_length=500), full: bo
         t0 = time.monotonic()
         try:
             await LIB.ensure_fresh(STATE["pl"])
-            r = await retrieve(STATE["pl"], q)
+            r, mode, context = await prepare(q, prev_q, prev_a, doc, full)
         except Exception:
             log.exception("retrieval failed")
             yield sse("fatal", {"message": "Couldn't reach Paperless right now. Is it running?"})
             return
-        mode = special_answer(q, r, full)
-        log.info("ask %r -> %d sources (%d ms)%s", q[:120], len(r["sources"]), r["ms"], f", {mode}" if mode else "")
+        _ask_log("ask", q, r, mode or ("llm" if r["llm_docs"] else "list" if r["listing"] else "none"), r["ms"])
         yield sse("sources", {**public(r), "library": len(LIB.docs)})
         if mode:
             yield sse("done", {"mode": mode, "ms": int((time.monotonic() - t0) * 1000)})
@@ -1106,7 +1281,7 @@ async def ask_stream(q: str = Query(..., min_length=1, max_length=500), full: bo
         got, text = False, ""
         try:
             STATE["last_ask"] = time.time()
-            async for tok in llm_stream(STATE["ol"], q, r["llm_docs"], r["missing"]):
+            async for tok in llm_stream(STATE["ol"], q, r["llm_docs"], r["missing"], context, r["scoped"] is not None):
                 got = True
                 text += tok
                 yield sse("token", {"t": tok})
@@ -1129,24 +1304,28 @@ async def ask_stream(q: str = Query(..., min_length=1, max_length=500), full: bo
 
 @app.post("/api/ask")
 async def ask_json(payload: dict):
-    """Non-streaming variant for curl / scripts: {"q": "...", "no_llm": false}."""
+    """Non-streaming variant for curl / scripts:
+    {"q": "...", "no_llm": false, "full": false, "prev": {"q": "...", "a": "..."}, "doc": 123}."""
     q = " ".join(str(payload.get("q", "")).split())[:500]
     if not q:
         return JSONResponse({"error": "missing q"}, status_code=400)
+    prev = payload.get("prev") if isinstance(payload.get("prev"), dict) else {}
+    doc = payload.get("doc") if isinstance(payload.get("doc"), int) else None
     t0 = time.monotonic()
     STATE["last_ask"] = time.time()
     await LIB.ensure_fresh(STATE["pl"])
-    r = await retrieve(STATE["pl"], q)
-    mode = special_answer(q, r, bool(payload.get("full")))
+    r, mode, context = await prepare(q, str(prev.get("q") or "")[:1000] or None, str(prev.get("a") or "")[:2000],
+                                     doc, bool(payload.get("full")))
+    scoped = r["scoped"] is not None
     out = public(r)
     out["mode"], out["answer"], out["unverified"] = mode or ("list" if r["listing"] else "none"), r["extractive"]["text"], []
     if payload.get("debug") and r["llm_docs"]:
-        out["prompt"] = build_prompt(q, r["llm_docs"], r["missing"])
+        out["prompt"] = build_prompt(q, r["llm_docs"], r["missing"], context, scoped)
     if r["llm_docs"] and not mode:
         out["mode"] = "extractive"
         if not payload.get("no_llm"):
             try:
-                text = "".join([t async for t in llm_stream(STATE["ol"], q, r["llm_docs"], r["missing"])])
+                text = "".join([t async for t in llm_stream(STATE["ol"], q, r["llm_docs"], r["missing"], context, scoped)])
                 if not _has_words(text):
                     raise RuntimeError(f"no usable answer: {text!r}")
                 out.update(verify_answer(text, r["llm_docs"]))
@@ -1155,8 +1334,35 @@ async def ask_json(payload: dict):
             except Exception as e:
                 log.warning("llm failed (%s): %s", type(e).__name__, e)
     out["total_ms"] = int((time.monotonic() - t0) * 1000)
-    log.info("ask(json) %r -> %s, %d sources, %d ms", q[:120], out["mode"], len(r["sources"]), out["total_ms"])
+    _ask_log("ask(json)", q, r, out["mode"], out["total_ms"])
     return out
+
+
+@app.post("/api/feedback")
+async def feedback_add(payload: dict):
+    if not FEEDBACK_ON:
+        return JSONResponse({"error": "feedback is turned off"}, status_code=404)
+    try:
+        entry = feedback.clean(payload)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    FEEDBACK_LOG.add(entry)
+    log.info("feedback %s on %r%s", entry["vote"], entry["q"][:120], " (with comment)" if entry.get("comment") else "")
+    return {"ok": True}
+
+
+@app.get("/api/feedback")
+async def feedback_list():
+    if not FEEDBACK_ON:
+        return JSONResponse({"error": "feedback is turned off"}, status_code=404)
+    return {**FEEDBACK_LOG.summary(), "items": FEEDBACK_LOG.entries()[:500]}
+
+
+@app.get("/feedback", response_class=HTMLResponse)
+async def feedback_page():
+    if not FEEDBACK_ON:
+        return HTMLResponse("Feedback is turned off.", status_code=404)
+    return HTMLResponse(feedback.render(FEEDBACK_LOG.entries()[:500], doc_link), headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/thumb/{doc_id}")

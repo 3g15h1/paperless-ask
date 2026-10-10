@@ -46,12 +46,13 @@ def test_worker_extracts_grounds_and_persists(monkeypatch, fake, tmp_path):
         assert "id member='JOHN DOE'" in cards[2]["dropped"] and cards[2]["total"] is None
         assert [d["date"] for d in cards[4]["dates"] if d["label"] == "due"] == ["2025-09-05"]
         assert cards[9]["vendor"] == ""
-        assert c.get("/healthz").json()["facts"] == {"enabled": True, "analysed": 9, "pending": 0, "hours": "any"}
+        n_text = len([d for d in fake_library.DOCS if d["content"]])
+        assert c.get("/healthz").json()["facts"] == {"enabled": True, "analysed": n_text, "pending": 0, "hours": "any"}
     assert (tmp_path / "facts.json").exists()
     n = len(fake.extractions)
     _, c = make_client(monkeypatch, fake, tmp_path)  # restart: cards come from disk
     with c:
-        assert c.get("/api/facts").json()["analysed"] == 9
+        assert c.get("/api/facts").json()["analysed"] == len([d for d in fake_library.DOCS if d["content"]])
         time.sleep(0.3)
     assert len(fake.extractions) == n
 
@@ -132,7 +133,7 @@ def test_date_answers_skip_past_dates(monkeypatch, fake, tmp_path):
 
     class D:
         def __init__(self, id):
-            self.id, self.title = id, f"Card {id}"
+            self.id, self.title, self.correspondent = id, f"Card {id}", None
     future = (date.today() + timedelta(days=30)).isoformat()
     cards = {1: {"vendor": "Example Mutual", "kind": "insurance", "dates": [{"label": "expires", "date": "2014-04-22"}]},
              2: {"vendor": "Example Mutual", "kind": "insurance", "dates": [{"label": "expires", "date": future}]},

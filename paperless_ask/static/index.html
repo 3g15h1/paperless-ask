@@ -169,6 +169,20 @@ mark { background: rgba(250,204,21,.2); color: #fef3c7; border-radius: 4px; padd
 .link-btn:hover { color: var(--ink); }
 a.link-btn { text-decoration: none; }
 
+/* ---------- follow-up / document context ---------- */
+.context { display: flex; align-items: center; gap: 8px; margin: 10px 4px 0; font-size: 13px; color: #c4b5fd; min-width: 0; }
+.context .txt { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.context button { flex: none; border: 1px solid var(--line); background: var(--glass); color: var(--muted); border-radius: 999px; width: 22px; height: 22px; line-height: 1; cursor: pointer; }
+.context button:hover { color: var(--ink); }
+.src-wrap { position: relative; }
+.src-wrap .src { padding-bottom: 38px; }
+.ask-doc { position: absolute; right: 12px; bottom: 10px; border: 1px solid rgba(167,139,250,.35); background: rgba(139,92,246,.12); color: #ddd6fe; border-radius: 999px; padding: 4px 11px; font-size: 12px; cursor: pointer; }
+.ask-doc:hover { background: rgba(139,92,246,.25); }
+.icon-btn.on { color: #a7f3d0; border-color: rgba(52,211,153,.4); }
+.fb { display: flex; gap: 8px; margin-top: 12px; }
+.fb input { flex: 1; min-width: 0; border: 1px solid var(--line); background: rgba(255,255,255,.05); color: var(--ink); border-radius: 10px; padding: 7px 10px; font: 14px var(--sans); }
+.fb .icon-btn { height: auto; }
+
 /* ---------- coming up ---------- */
 body.asked #upcomingWrap { display: none; }
 .upcoming { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr); }
@@ -235,6 +249,7 @@ footer a { color: var(--muted); }
       </button>
     </div>
   </form>
+  <div class="context" id="ctx" hidden><span class="txt" id="ctxText"></span><button type="button" id="ctxClear" title="Start a new question" aria-label="Start a new question">×</button></div>
   <div class="chips" id="chips"></div>
 
   <section id="upcomingWrap" hidden>
@@ -254,6 +269,8 @@ footer a { color: var(--muted); }
         <span class="label"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>Answer</span>
         <span class="badge" id="mode"></span>
         <span class="head-actions">
+          <button class="icon-btn" id="upBtn" type="button" title="Good answer" aria-label="Good answer" hidden>👍</button>
+          <button class="icon-btn" id="downBtn" type="button" title="Wrong or unhelpful answer" aria-label="Wrong or unhelpful answer" hidden>👎</button>
           <button class="icon-btn" id="copyBtn" type="button" title="Copy answer" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>
           <button class="icon-btn" id="aiBtn" type="button" title="Have the local AI read the documents and answer" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"/></svg>Ask the AI</button>
           <button class="icon-btn" id="againBtn" type="button" title="Ask again" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>Ask again</button>
@@ -262,6 +279,7 @@ footer a { color: var(--muted); }
       <div class="answer-text" id="answer"></div>
       <div class="facts" id="facts"></div>
       <div class="breakdown" id="breakdown"></div>
+      <form class="fb" id="fbBox" hidden><input id="fbText" maxlength="1000" placeholder="What was wrong? (optional)" aria-label="What was wrong?"><button class="icon-btn" type="submit">Send</button></form>
       <div class="note" id="note" hidden></div>
       <div class="meta-line" id="metaLine"></div>
     </article>
@@ -278,7 +296,7 @@ footer a { color: var(--muted); }
 
   <footer>
     <div class="status"><span class="led" id="led"></span><span id="statusText">Connecting&hellip;</span></div>
-    <div style="margin-top:10px">Runs on your own hardware &mdash; your documents never leave your network.</div>
+    <div style="margin-top:10px">Runs on your own hardware &mdash; your documents never leave your network.<span id="fbLink" hidden> &middot; <a href="/feedback">Answer feedback</a></span></div>
   </footer>
 </main>
 
@@ -307,9 +325,11 @@ footer a { color: var(--muted); }
     meta: $("#metaLine"), sources: $("#sources"), sourcesWrap: $("#sourcesWrap"), timer: $("#timer"),
     readLabel: $("#readLabel"), recent: $("#recent"), recentWrap: $("#recentWrap"),
     copyBtn: $("#copyBtn"), againBtn: $("#againBtn"), aiBtn: $("#aiBtn"), breakdown: $("#breakdown"),
-    upcoming: $("#upcoming"), upcomingWrap: $("#upcomingWrap"), calLink: $("#calLink"), led: $("#led"), statusText: $("#statusText"),
+    upcoming: $("#upcoming"), upcomingWrap: $("#upcomingWrap"), calLink: $("#calLink"),
+    ctx: $("#ctx"), ctxText: $("#ctxText"), upBtn: $("#upBtn"), downBtn: $("#downBtn"), fbBox: $("#fbBox"), fbText: $("#fbText"), led: $("#led"), statusText: $("#statusText"),
   };
   let es = null, tick = null, current = null, libSize = null;
+  let followCtx = null, docScope = null;  // the previous question (for follow-ups) and "ask about this document"
 
   const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -365,7 +385,7 @@ footer a { color: var(--muted); }
 
   // ---------- chips / input ----------
   els.chips.innerHTML = SUGGESTIONS.map(([e, s]) => `<button type="button" class="chip" data-q="${esc(s)}"><span class="em">${e}</span>${esc(s)}</button>`).join("");
-  els.chips.addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (c) { els.q.value = c.dataset.q; autosize(); ask(c.dataset.q); } });
+  els.chips.addEventListener("click", (e) => { const c = e.target.closest(".chip"); if (c) { newTopic(); els.q.value = c.dataset.q; autosize(); ask(c.dataset.q); } });
   function autosize() {
     els.q.style.height = "auto";
     els.q.style.height = Math.min(els.q.scrollHeight + 2, 160) + "px";
@@ -378,7 +398,7 @@ footer a { color: var(--muted); }
   els.q.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); els.form.requestSubmit(); } });
   els.form.addEventListener("submit", (e) => { e.preventDefault(); const q = els.q.value.trim(); if (q && !es) ask(q); });
   let ph = 0;
-  setInterval(() => { if (document.activeElement !== els.q && !els.q.value) { ph = (ph + 1) % PLACEHOLDERS.length; els.q.placeholder = PLACEHOLDERS[ph]; } }, 4000);
+  setInterval(() => { if (document.activeElement !== els.q && !els.q.value && !docScope) { ph = (ph + 1) % PLACEHOLDERS.length; els.q.placeholder = PLACEHOLDERS[ph]; } }, 4000);
 
   // ---------- rendering ----------
   function setStage(name) {
@@ -398,14 +418,14 @@ footer a { color: var(--muted); }
         s.category ? `<span class="pill cat">${esc(s.category)}</span>` : "",
         s.correspondent ? `<span class="pill">${esc(s.correspondent)}</span>` : "",
         ...(s.tags || []).slice(0, 3).map((t) => `<span class="pill">#${esc(t)}</span>`)].join("");
-      return `<a class="card src" id="src-${s.n}" href="${esc(s.url)}" target="_blank" rel="noopener" style="animation-delay:${i * 70}ms">
+      return `<div class="src-wrap"><a class="card src" id="src-${s.n}" href="${esc(s.url)}" target="_blank" rel="noopener" style="animation-delay:${i * 70}ms">
         <div class="thumb"><span class="num">${s.n}</span><img alt="" loading="lazy" src="${esc(s.thumb)}" onload="this.classList.add('loaded');this.parentNode.style.animation='none'" onerror="this.remove()"></div>
         <div class="src-body">
           <div class="src-title"><span style="overflow:hidden;text-overflow:ellipsis">${esc(s.title)}</span><svg class="ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg></div>
           <div class="src-head">${esc(s.headline)}</div>
           <div class="pills">${pills}</div>
           <div class="snippet">${highlight(s.snippet, terms)}</div>
-        </div></a>`;
+        </div></a><button type="button" class="ask-doc" data-id="${s.id}" data-title="${esc(s.title)}">Ask about this</button></div>`;
     }).join("");
   }
   function renderFacts(facts) {
@@ -428,6 +448,50 @@ footer a { color: var(--muted); }
   els.againBtn.addEventListener("click", () => { if (current) ask(current.q); });
   els.aiBtn.addEventListener("click", () => { if (current) ask(current.q, true); });
 
+  // ---------- follow-ups and "ask about this document" ----------
+  function renderCtx() {
+    const parts = [];
+    if (docScope) parts.push(`📄 About “${docScope.title}”`);
+    if (followCtx) parts.push(`↳ Follow-up to “${followCtx.q}”`);
+    els.ctx.hidden = !parts.length;
+    els.ctxText.textContent = parts.join(" · ");
+    els.ctx.title = parts.join("\n");
+  }
+  function newTopic() { followCtx = null; docScope = null; renderCtx(); }
+  $("#ctxClear").addEventListener("click", () => { newTopic(); els.q.focus(); });
+  els.sources.addEventListener("click", (e) => {
+    const b = e.target.closest(".ask-doc"); if (!b) return;
+    e.preventDefault();
+    docScope = { id: +b.dataset.id, title: b.dataset.title }; followCtx = null; renderCtx();
+    els.q.value = ""; els.q.placeholder = "Ask about this document…"; autosize();
+    window.scrollTo({ top: 0, behavior: "smooth" }); els.q.focus({ preventScroll: true });
+  });
+
+  // ---------- feedback ----------
+  const newId = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+  function sendFeedback(vote, comment) {
+    if (!current) return;
+    current.fid = current.fid || newId();
+    current.vote = vote;
+    const body = { id: current.fid, vote, comment: comment || "", q: current.q, context_q: current.context_q || "", doc: current.doc || null,
+      mode: current.mode, answer: current.a, missing: current.missing || [], sources: (current.sources || []).map(({ id, title }) => ({ id, title })) };
+    fetch("/api/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+    showVote();
+  }
+  function showVote() {
+    const on = !!(current && window.PAPERLESS_ASK && CONFIG.feedback);
+    els.upBtn.hidden = els.downBtn.hidden = !on;
+    els.upBtn.classList.toggle("on", !!(current && current.vote === "up"));
+    els.downBtn.classList.toggle("on", !!(current && current.vote === "down"));
+  }
+  els.upBtn.addEventListener("click", () => { sendFeedback("up"); els.fbBox.hidden = true; });
+  els.downBtn.addEventListener("click", () => { sendFeedback("down"); els.fbBox.hidden = false; els.fbText.value = ""; els.fbText.focus(); });
+  els.fbBox.addEventListener("submit", (e) => {
+    e.preventDefault();
+    sendFeedback("down", els.fbText.value.trim());
+    els.fbBox.hidden = true; els.note.hidden = false; els.note.textContent = "Thanks — that's saved for review.";
+  });
+
   // ---------- totals ----------
   const money = (v) => "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   function renderBreakdown(t) {
@@ -447,6 +511,7 @@ footer a { color: var(--muted); }
     els.facts.innerHTML = ""; els.note.hidden = true; els.meta.textContent = "";
     els.sources.innerHTML = ""; els.sourcesWrap.hidden = true;
     els.copyBtn.hidden = true; els.againBtn.hidden = true; els.aiBtn.hidden = true; els.breakdown.innerHTML = "";
+    els.upBtn.hidden = els.downBtn.hidden = true; els.fbBox.hidden = true;
     document.getElementById("stages").hidden = false;
     setMode("", "");
     els.q.value = q; autosize();
@@ -454,6 +519,7 @@ footer a { color: var(--muted); }
 
   function showSaved(x) {
     stop();
+    newTopic();
     resetView(x.q);
     document.getElementById("stages").hidden = true;
     current = x;
@@ -469,6 +535,7 @@ footer a { color: var(--muted); }
       els.note.textContent = "⚠︎ I couldn't find " + x.unverified.join(", ") + " in the documents — double-check the source below.";
     }
     els.copyBtn.hidden = false; els.againBtn.hidden = false;
+    showVote();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -488,7 +555,12 @@ footer a { color: var(--muted); }
     const url = new URL(location.href); url.searchParams.set("q", q); history.replaceState(null, "", url);
 
     let buf = "", r = null, done = false;
-    es = new EventSource("/api/ask/stream?q=" + encodeURIComponent(q) + (full ? "&full=1" : ""));
+    const params = new URLSearchParams({ q });
+    if (full) params.set("full", "1");
+    const sentCtx = followCtx && followCtx.q !== q ? followCtx : null;  // "Ask again"/"Ask the AI" re-ask the same thing
+    if (sentCtx) { params.set("prev_q", sentCtx.q); params.set("prev_a", (sentCtx.a || "").slice(0, 600)); }
+    if (docScope) params.set("doc", String(docScope.id));
+    es = new EventSource("/api/ask/stream?" + params);
     autosize();
     const finish = (mode, d = {}) => {
       done = true;
@@ -518,7 +590,10 @@ footer a { color: var(--muted); }
         els.answer.className = "answer-text quick";
         els.answer.innerHTML = renderAnswer(a, sources);
         if (mode === "list") { els.answer.className = "answer-text"; setMode("ok", `Found ${sources.length} · ${secs}s`); }
-        else if (mode === "none") setMode("", sources.length ? "No exact match" : "No matches");
+        else if (mode === "none") {
+          setMode("", sources.length ? "No exact match" : "No matches");
+          if (r && r.refused && sources.length) els.aiBtn.hidden = false;  // "Ask the AI" to read the closest ones anyway
+        }
         else setMode("warn", "Quick answer");
       }
       els.timer.textContent = secs + "s";
@@ -528,9 +603,11 @@ footer a { color: var(--muted); }
       }
       els.againBtn.hidden = false;
       current = { q, a, mode, ts: Date.now(), unverified: d.unverified || [], facts: r && els.facts.innerHTML ? r.extractive.facts : [], terms: r ? r.highlight : [],
-        total: mode === "total" && r ? r.total : null,
+        total: mode === "total" && r ? r.total : null, context_q: r ? r.context_q : q, doc: r ? r.scoped : null, missing: r ? r.missing : [],
         sources: sources.map(({ n, id, title, headline, created, type, correspondent, tags, snippet, url, thumb }) => ({ n, id, title, headline, created, type, correspondent, tags, snippet, url, thumb })) };
       if (r) remember(current);
+      showVote();
+      if (r && mode !== "none") { followCtx = { q: r.context_q || q, a }; renderCtx(); }
     };
     es.addEventListener("sources", (e) => {
       r = JSON.parse(e.data);
@@ -610,6 +687,7 @@ footer a { color: var(--muted); }
     } catch { els.upcomingWrap.hidden = true; }
   }
 
+  $("#fbLink").hidden = !CONFIG.feedback;
   renderRecent();
   loadUpcoming(); setInterval(loadUpcoming, 15 * 60000);
   status(); setInterval(status, 60000);
