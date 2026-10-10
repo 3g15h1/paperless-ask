@@ -30,7 +30,9 @@ import httpx
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
-from . import __version__
+from . import __version__, facts, reminders, totals
+from .textutil import (ANSWER_DATE_RE, DATE_RE, MONEY_RE, MONTH_NAMES, MONTHS, date_variants, match_to_date,
+                       num_variants)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -63,6 +65,16 @@ ASK_USERNAME = os.environ.get("ASK_USERNAME", "ask")
 ASK_PASSWORD = os.environ.get("ASK_PASSWORD", "")
 # Optional "|"-separated example questions shown as chips; each may start with an emoji and a space.
 SUGGESTIONS = [s.strip() for s in os.environ.get("ASK_SUGGESTIONS", "").split("|") if s.strip()]
+# Fact cards, reminders and totals (see docs/design/2026-10-10-facts-reminders-totals.md)
+DATA_DIR = Path(os.environ.get("DATA_DIR") or os.environ.get("STATE_DIRECTORY", "").split(":")[0] or "data")
+FACTS_ON = os.environ.get("FACTS", "on").lower() not in ("0", "off", "false", "no")
+FACTS_HOURS = os.environ.get("FACTS_HOURS", "").strip()  # e.g. "1-6"; empty = any time the app is idle
+if FACTS_HOURS and not re.fullmatch(r"([01]?\d|2[0-3])(-([01]?\d|2[0-3]))?", FACTS_HOURS):
+    raise RuntimeError(f"FACTS_HOURS={FACTS_HOURS!r}: use start-end hours like 1-6 (or 22-5)")
+FACTS_MAX_CHARS = _env_int("FACTS_MAX_CHARS", 4000)
+REMINDER_DAYS = _env_int("REMINDER_DAYS", 60)
+ALERT_DAYS = sorted({int(x) for x in os.environ.get("ALERT_DAYS", "14,3,1,0").split(",") if x.strip()}, reverse=True)
+DONE_TAGS = [t.strip() for t in os.environ.get("DONE_TAGS", "paid").split(",") if t.strip()]
 STATIC_DIR = Path(__file__).with_name("static")
 
 # ---------------------------------------------------------------- text utils
@@ -113,19 +125,7 @@ def _load_synonyms(spec: str) -> None:
             EXPANSIONS[word] = list(dict.fromkeys(EXPANSIONS.get(word, []) + extra))
 
 
-MONTH_NAMES = ["", "january", "february", "march", "april", "may", "june", "july", "august",
-               "september", "october", "november", "december"]
-MONTHS = {}
-for _i, _name in enumerate(MONTH_NAMES[1:], 1):
-    MONTHS[_name] = _i
-    MONTHS[_name[:3]] = _i
-MONTHS["sept"] = 9
-
 TOKEN_RE = re.compile(r"[a-z0-9]+(?:[-'.@][a-z0-9]+)*")
-MONEY_RE = re.compile(r"\$\s?\(?\d[\d,]*(?:\.\d{2})?\)?|(?<![\d.,/-])\d{1,3}(?:,?\d{3})*\.\d{2}(?![\d.])")
-DATE_RE = re.compile(
-    r"\b(?:\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2}|"
-    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.? \d{1,2},? \d{4})\b", re.I)
 AMOUNT_Q = re.compile(r"\b(how much|cost|costs|price|paid|pay|total|amount|owe|spent|spend|charged?|"
                       r"bill|fee|wages?|salary|income|earn(ed|ings)?)\b", re.I)
 DATE_Q = re.compile(r"\b(when|date|what day|expire[sd]?|expiration|due|valid)\b", re.I)
@@ -239,13 +239,14 @@ def make_headline(content: str) -> str:
 
 
 class Doc:
-    __slots__ = ("id", "title", "created", "content", "correspondent", "document_type", "tags",
+    __slots__ = ("id", "title", "created", "modified", "content", "correspondent", "document_type", "tags",
                  "tf", "length", "pieces", "headline", "lower")
 
     def __init__(self, raw: dict, names: dict):
         self.id = raw["id"]
         self.title = raw.get("title") or f"Document {self.id}"
         self.created = (raw.get("created") or "")[:10]
+        self.modified = raw.get("modified") or ""
         self.content = raw.get("content") or ""
         self.correspondent = names["correspondents"].get(raw.get("correspondent"))
         self.document_type = names["document_types"].get(raw.get("document_type"))
@@ -523,7 +524,8 @@ async def retrieve(client, question: str) -> dict:
 
     highlight = {w for w in raw if len(w) > 2} | {t for t, w in weights.items() if w < 1 and len(t) > 2}
     return {
-        "question": question, "sources": sources, "llm_docs": [] if refuse or listing else llm_docs,
+        "question": question, "sources": with_categories(sources), "words": raw,
+        "llm_docs": [] if refuse or listing else llm_docs,
         "highlight": sorted(highlight, key=len, reverse=True)[:20], "months": months, "years": years,
         "missing": missing, "refused": refuse, "listing": listing and not refuse,
         "extractive": extractive_answer(question, sources, llm_docs, missing if refuse else [], listing),
@@ -610,34 +612,12 @@ def build_prompt(question: str, llm_docs: list, missing: list[str] = ()) -> str:
             "End each sentence with the number of the source it came from in square brackets, e.g. [1].")
 
 
-def _num_variants(s: str) -> set[str]:
-    v = s.replace(",", "").rstrip(".")
-    out = {v}
-    if v.endswith(".00"):
-        out.add(v[:-3])
-    elif "." not in v:
-        out.add(v + ".00")
-    return out
-
-
-ANSWER_DATE_RE = re.compile(
-    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? (\d{1,2})(?:st|nd|rd|th)?,? (\d{4})\b"
-    r"|\b(\d{1,2})/(\d{1,2})/(\d{4}|\d{2})\b", re.I)
+_num_variants = num_variants
 
 
 def _date_variants(m: re.Match) -> tuple[str, set[str]]:
-    if m.group(1):
-        mo, d, y = MONTHS[m.group(1).lower()], int(m.group(2)), int(m.group(3))
-    else:
-        mo, d, y = int(m.group(4)), int(m.group(5)), int(m.group(6))
-        y += 2000 if y < 100 else 0
-    if not (1 <= mo <= 12 and 1 <= d <= 31):
-        return m.group(0), set()
-    full, abbr = MONTH_NAMES[mo], MONTH_NAMES[mo][:3]
-    out = {f"{full} {d} {y}", f"{full} {d:02} {y}", f"{abbr} {d} {y}", f"{abbr}. {d} {y}", f"{abbr} {d:02} {y}",
-           f"{mo}/{d}/{y}", f"{mo:02}/{d:02}/{y}", f"{mo:02}/{d:02}/{y % 100:02}", f"{mo}/{d}/{y % 100:02}",
-           f"{y}-{mo:02}-{d:02}", f"{mo:02}{d:02}{y}", f"{mo:02}-{d:02}-{y}"}
-    return m.group(0), out
+    d = match_to_date(m)
+    return m.group(0), (date_variants(d.year, d.month, d.day) if d else set())
 
 
 def _tidy_citations(text: str) -> str:
@@ -757,8 +737,192 @@ async def warm_model(client):
 
 # ---------------------------------------------------------------- app
 
-STATE = {}
+STATE = {"last_ask": 0.0}
 HTTP_TRANSPORT = None  # tests swap in an httpx.MockTransport
+STORE: facts.FactStore | None = None
+
+
+def card_for(doc) -> dict | None:
+    """The document's fact card, if there is one for its current version."""
+    c = STORE.get(doc.id) if STORE is not None and FACTS_ON else None
+    return c if c and c.get("modified") == doc.modified else None
+
+
+def all_cards() -> dict[int, dict]:
+    return {i: c for i, d in LIB.docs.items() if (c := card_for(d))}
+
+
+def with_categories(sources: list) -> list:
+    for s in sources:
+        c = card_for(LIB.docs[s["id"]]) if s["id"] in LIB.docs else None
+        s["category"] = c["category"] if c and c.get("category") != "other" else None
+    return sources
+
+
+def doc_link(doc_id: int) -> str:
+    return f"{PAPERLESS_LINK_URL}/documents/{doc_id}/details"
+
+
+def in_fact_hours(now: datetime) -> bool:
+    if not FACTS_HOURS:
+        return True
+    a, _, b = FACTS_HOURS.partition("-")
+    start, end = int(a), int(b or a)
+    return start <= now.hour <= end if start <= end else (now.hour >= start or now.hour <= end)
+
+
+def facts_todo() -> list:
+    failed = STATE.setdefault("fact_failures", {})
+    return [d for d in LIB.docs.values()
+            if d.content.strip() and STORE.stale(d.id, d.modified, OLLAMA_MODEL)
+            and failed.get((d.id, d.modified), 0) < 3]
+
+
+async def extract_one(doc) -> None:
+    async with LLM_LOCK:
+        t0 = time.monotonic()
+        card = await facts.extract(STATE["ol"], OLLAMA_URL, OLLAMA_MODEL,
+                                   ollama_options(temperature=0, num_ctx=4096, num_predict=500),
+                                   OLLAMA_KEEP_ALIVE, doc.title, doc.content, doc.correspondent, FACTS_MAX_CHARS)
+    STORE.put(doc.id, card, doc.modified, OLLAMA_MODEL)
+    log.info("facts for #%d in %.0fs: %s/%s, total %s, %d dates, %d ids%s", doc.id, time.monotonic() - t0,
+             card["kind"], card["category"], card["total"], len(card["dates"]), len(card["ids"]),
+             f", dropped {len(card['dropped'])}" if card["dropped"] else "")
+
+
+async def facts_worker():
+    """Extract fact cards one document at a time, only while nobody is asking questions."""
+    backoff_until = 0.0
+    while True:
+        await asyncio.sleep(STATE.get("facts_poll", 20))
+        if not FACTS_ON or not LIB.docs or time.time() < backoff_until or not in_fact_hours(datetime.now()):
+            continue
+        if time.time() - STATE["last_ask"] < STATE.get("facts_idle", 120) or LLM_LOCK.locked():
+            continue
+        STORE.prune(LIB.docs.keys())
+        todo = facts_todo()
+        if not todo:
+            continue
+        doc = max(todo, key=lambda d: (d.modified, d.id))
+        try:
+            await extract_one(doc)
+        except asyncio.CancelledError:
+            raise
+        except httpx.HTTPError as e:
+            log.warning("fact extraction paused for 10 min, Ollama unavailable: %s", e)
+            backoff_until = time.time() + 600
+        except Exception as e:
+            key = (doc.id, doc.modified)
+            STATE["fact_failures"][key] = STATE["fact_failures"].get(key, 0) + 1
+            log.warning("fact extraction failed for #%d (%s): %s", doc.id, type(e).__name__, e)
+
+
+def facts_status() -> dict:
+    with_text = [d for d in LIB.docs.values() if d.content.strip()]
+    done = sum(1 for d in with_text if card_for(d))
+    return {"enabled": FACTS_ON, "analysed": done, "pending": len(with_text) - done if FACTS_ON else 0,
+            "hours": FACTS_HOURS or "any"}
+
+
+# ---------------------------------------------------------------- answers without the model
+
+_ID_WORDS = ("policy", "account", "invoice", "order", "member", "vin", "reference", "confirmation", "claim",
+             "serial", "plate", "tracking", "customer", "group", "case")
+
+
+def _long_date(iso: str) -> str:
+    d = date.fromisoformat(iso)
+    return f"{d:%B} {d.day}, {d.year}"
+
+
+def fact_answer(question: str, r: dict) -> str | None:
+    """Answer straight from fact cards when the question asks for one labelled fact and the documents
+    the model would have read agree on a single value. None means: let the model answer."""
+    if not r["llm_docs"] or r["refused"] or r["listing"]:
+        return None
+    q = question.lower()
+    if re.search(r"\b(expir\w*|renew\w*|valid (until|through|thru))\b", q):
+        want = ("date", "expires")
+    elif re.search(r"\bdue\b|\bpay(ment)? by\b", q) and DATE_Q.search(q):
+        want = ("date", "due")
+    elif NUMBER_Q.search(q) and not AMOUNT_Q.search(q):
+        want = ("id", [w for w in _ID_WORDS if re.search(rf"\b{w}", q)])
+    elif re.search(r"\b(how much|cost|price|total|amount|paid|owe)\b", q):
+        want = ("total", None)
+    else:
+        return None
+    found = {}  # value -> (n, doc, card, label)
+    for n, doc, _ in r["llm_docs"]:
+        card = card_for(doc)
+        if not card:
+            return None  # a document the model would read has no card yet
+        name = card.get("vendor") or doc.title
+        if want[0] == "date":
+            for d in card["dates"]:
+                if d["label"] == want[1]:
+                    found.setdefault(d["date"], (n, name, card))
+        elif want[0] == "id":
+            for i in card["ids"]:
+                if not want[1] or any(w in i["label"].lower() for w in want[1]):
+                    found.setdefault(i["value"], (n, name, card, i["label"]))
+        elif card.get("total") is not None:
+            found.setdefault(card["total"], (n, name, card))
+    if want[0] == "date" and len(found) > 1:
+        # "when does it expire / when is it due" means the next one: past dates are history
+        today = date.today().isoformat()
+        found = {v: x for v, x in found.items() if v >= today}
+    if len(found) != 1:
+        return None
+    value, (n, name, card, *label) = next(iter(found.items()))
+    if want[0] == "date" and want[1] == "expires":
+        what = {"insurance": " insurance", "id": " ID"}.get(card["kind"], "")
+        return f"{name}{what} expires on {_long_date(value)} [{n}]."
+    if want[0] == "date":
+        if card.get("total"):
+            return f"{totals.money(card['total'])} is due to {name} on {_long_date(value)} [{n}]."
+        return f"Payment to {name} is due on {_long_date(value)} [{n}]."
+    if want[0] == "id":
+        return f"{label[0].rstrip(':').title()}: {value} [{n}] ({name})."
+    return f"{name} total: {totals.money(value)} [{n}]."
+
+
+def total_answer(question: str, r: dict) -> bool:
+    """Fill r with an itemised total if this is a "how much did I spend…" question."""
+    if not totals.is_total_question(question):
+        return False
+    words = [w for w in r["words"] if w not in MONTHS]
+    with_text = [d for d in LIB.docs.values() if d.content.strip()]  # documents without text never get a card
+    res = totals.compute(question, words, with_text, all_cards(), r["years"], r["months"], date.today())
+    sources = []
+    for n, i in enumerate(res["items"], 1):
+        when = f" · {_long_date(i['date'].isoformat())}" if i["date"] else ""
+        s = i["doc"].card(n, f"{totals.money(i['amount'])}{when} · {i['vendor']}", 1.0)
+        sources.append(s)
+    cites = "".join(f"[{s['n']}]" for s in sources[:12])
+    r["sources"] = with_categories(sources)
+    r["llm_docs"] = []
+    r["total"] = {
+        "total": res["total"], "pending": res["pending"], "categories": res["categories"], "vendors": res["vendors"],
+        "years": res["years"], "months": res["months"],
+        "items": [{"n": n, "id": i["doc"].id, "amount": i["amount"], "date": i["date"] and i["date"].isoformat(),
+                   "vendor": i["vendor"], "kind": i["kind"]} for n, i in enumerate(res["items"], 1)],
+        "excluded": [{"id": i["doc"].id, "title": i["doc"].title, "amount": i["amount"], "url": doc_link(i["doc"].id),
+                      "date": i["date"] and i["date"].isoformat(), "reason": i["reason"]} for i in res["excluded"]],
+    }
+    r["extractive"] = {"text": totals.describe(res, MONTH_NAMES, cites), "facts": []}
+    return True
+
+
+def special_answer(question: str, r: dict, full: bool) -> str | None:
+    """'total' or 'facts' when the question was answered without the model (r is updated), else None."""
+    if not FACTS_ON or r["refused"]:
+        return None
+    if total_answer(question, r):
+        return "total"
+    if not full and (text := fact_answer(question, r)):
+        r["extractive"] = {"text": text, "facts": []}
+        return "facts"
+    return None
 
 
 def read_token() -> str:
@@ -794,14 +958,18 @@ async def lifespan(_app):
     STATE["pl"] = httpx.AsyncClient(headers={"Authorization": f"Token {read_token()}",
                                              "Accept": "application/json"}, transport=HTTP_TRANSPORT)
     STATE["ol"] = httpx.AsyncClient(transport=HTTP_TRANSPORT)
+    global STORE
+    STORE = facts.FactStore(DATA_DIR / "facts.json")
     STATE["page"] = render_page()
     STATE["thumbs"] = OrderedDict()
     STATE["started"] = time.time()
-    log.info("paperless-ask %s starting: paperless=%s ollama=%s model=%s login=%s", __version__,
-             PAPERLESS_URL, OLLAMA_URL, OLLAMA_MODEL, "on" if ASK_PASSWORD else "off")
-    bg = asyncio.create_task(background())
+    log.info("paperless-ask %s starting: paperless=%s ollama=%s model=%s login=%s facts=%s (%d cards in %s)",
+             __version__, PAPERLESS_URL, OLLAMA_URL, OLLAMA_MODEL, "on" if ASK_PASSWORD else "off",
+             f"on, hours {FACTS_HOURS or 'any'}" if FACTS_ON else "off", len(STORE.cards), DATA_DIR)
+    tasks = [asyncio.create_task(background()), asyncio.create_task(facts_worker())]
     yield
-    bg.cancel()
+    for t in tasks:
+        t.cancel()
     await STATE["pl"].aclose()
     await STATE["ol"].aclose()
 
@@ -809,7 +977,7 @@ async def lifespan(_app):
 def render_page() -> str:
     """index.html with the per-install settings the browser needs."""
     page = (STATIC_DIR / "index.html").read_text()
-    config = {"suggestions": SUGGESTIONS}
+    config = {"suggestions": SUGGESTIONS, "facts": FACTS_ON, "reminder_days": REMINDER_DAYS}
     tag = "<script>window.PAPERLESS_ASK = " + json.dumps(config).replace("</", "<\\/") + ";</script>"
     return page.replace("<!--CONFIG-->", tag, 1)
 
@@ -859,6 +1027,7 @@ async def healthz():
         "ok": bool(LIB.docs),
         "paperless": {"ok": pl_ok and LIB.error is None, "documents": len(LIB.docs), "refreshed": refreshed},
         "llm": ol,
+        "facts": facts_status(),
         "uptime_s": int(time.time() - STATE["started"]),
         "version": __version__,
     }
@@ -875,7 +1044,31 @@ async def stats():
         pass
     ol = await ollama_status(STATE["ol"])
     return {"documents": len(LIB.docs), "refreshed": int(LIB.refreshed_at), "llm": ol["ok"],
-            "model": OLLAMA_MODEL, "paperless": PAPERLESS_LINK_URL}
+            "model": OLLAMA_MODEL, "paperless": PAPERLESS_LINK_URL, "facts": facts_status()}
+
+
+@app.get("/api/upcoming")
+async def upcoming(days: int = Query(REMINDER_DAYS, ge=0, le=3660)):
+    """Coming due and expiry dates. `alerts` are the items to notify about today (ALERT_DAYS)."""
+    await LIB.ensure_fresh(STATE["pl"])
+    return reminders.upcoming(LIB.docs.values(), all_cards(), date.today(), days, DONE_TAGS, doc_link, ALERT_DAYS)
+
+
+@app.get("/calendar.ics")
+async def calendar(request: Request):
+    await LIB.ensure_fresh(STATE["pl"])
+    up = reminders.upcoming(LIB.docs.values(), all_cards(), date.today(), 365, DONE_TAGS, doc_link, ALERT_DAYS)
+    body = reminders.ics(up["items"], ALERT_DAYS, host=request.url.hostname or "paperless-ask")
+    return Response(body, media_type="text/calendar; charset=utf-8",
+                    headers={"Content-Disposition": 'inline; filename="paperless-coming-up.ics"'})
+
+
+@app.get("/api/facts")
+async def facts_list():
+    """Every fact card, for checking what the extractor found (and dropped)."""
+    cards = all_cards()
+    return {**facts_status(), "cards": [{"id": i, "title": LIB.docs[i].title, "url": doc_link(i), **c}
+                                        for i, c in sorted(cards.items())]}
 
 
 def sse(event: str, data) -> str:
@@ -887,8 +1080,9 @@ def public(r: dict) -> dict:
 
 
 @app.get("/api/ask/stream")
-async def ask_stream(q: str = Query(..., min_length=1, max_length=500)):
+async def ask_stream(q: str = Query(..., min_length=1, max_length=500), full: bool = False):
     q = " ".join(q.split())
+    STATE["last_ask"] = time.time()
 
     async def events():
         t0 = time.monotonic()
@@ -899,14 +1093,19 @@ async def ask_stream(q: str = Query(..., min_length=1, max_length=500)):
             log.exception("retrieval failed")
             yield sse("fatal", {"message": "Couldn't reach Paperless right now. Is it running?"})
             return
-        log.info("ask %r -> %d sources (%d ms)", q[:120], len(r["sources"]), r["ms"])
+        mode = special_answer(q, r, full)
+        log.info("ask %r -> %d sources (%d ms)%s", q[:120], len(r["sources"]), r["ms"], f", {mode}" if mode else "")
         yield sse("sources", {**public(r), "library": len(LIB.docs)})
+        if mode:
+            yield sse("done", {"mode": mode, "ms": int((time.monotonic() - t0) * 1000)})
+            return
         if not r["llm_docs"]:
             yield sse("done", {"mode": "list" if r["listing"] else "none", "ms": int((time.monotonic() - t0) * 1000)})
             return
         yield sse("stage", {"stage": "writing", "busy": LLM_LOCK.locked()})
         got, text = False, ""
         try:
+            STATE["last_ask"] = time.time()
             async for tok in llm_stream(STATE["ol"], q, r["llm_docs"], r["missing"]):
                 got = True
                 text += tok
@@ -935,13 +1134,15 @@ async def ask_json(payload: dict):
     if not q:
         return JSONResponse({"error": "missing q"}, status_code=400)
     t0 = time.monotonic()
+    STATE["last_ask"] = time.time()
     await LIB.ensure_fresh(STATE["pl"])
     r = await retrieve(STATE["pl"], q)
+    mode = special_answer(q, r, bool(payload.get("full")))
     out = public(r)
-    out["mode"], out["answer"], out["unverified"] = "list" if r["listing"] else "none", r["extractive"]["text"], []
+    out["mode"], out["answer"], out["unverified"] = mode or ("list" if r["listing"] else "none"), r["extractive"]["text"], []
     if payload.get("debug") and r["llm_docs"]:
         out["prompt"] = build_prompt(q, r["llm_docs"], r["missing"])
-    if r["llm_docs"]:
+    if r["llm_docs"] and not mode:
         out["mode"] = "extractive"
         if not payload.get("no_llm"):
             try:

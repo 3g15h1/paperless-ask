@@ -9,6 +9,8 @@ Wants=network-online.target
 User=paperless-ask
 Group=paperless-ask
 EnvironmentFile=/etc/paperless-ask/env
+# Fact cards are kept in /var/lib/paperless-ask (passed to the app as STATE_DIRECTORY)
+StateDirectory=paperless-ask
 ExecStart=/opt/paperless-ask/venv/bin/paperless-ask
 NoNewPrivileges=true
 ProtectSystem=strict

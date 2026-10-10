@@ -167,6 +167,31 @@ mark { background: rgba(250,204,21,.2); color: #fef3c7; border-radius: 4px; padd
 .recent .sub { font-size: 12.5px; color: var(--faint); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .link-btn { border: 0; background: none; color: var(--faint); font-size: 12.5px; cursor: pointer; padding: 4px; }
 .link-btn:hover { color: var(--ink); }
+a.link-btn { text-decoration: none; }
+
+/* ---------- coming up ---------- */
+body.asked #upcomingWrap { display: none; }
+.upcoming { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr); }
+.upcoming a { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-radius: 16px; border: 1px solid var(--line); background: rgba(14,18,40,.55); color: inherit; text-decoration: none; transition: background .2s, border-color .2s; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.upcoming a:hover { background: rgba(22,26,54,.8); border-color: rgba(34,211,238,.35); }
+.upcoming .days { flex: none; width: 46px; height: 42px; border-radius: 11px; display: grid; place-items: center; align-content: center; text-align: center; line-height: 1.05; background: rgba(34,211,238,.1); color: #a5f3fc; font-weight: 700; font-size: 16px; font-variant-numeric: tabular-nums; }
+.upcoming .days small { display: block; font-size: 9.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; opacity: .8; }
+.upcoming .soon .days { background: rgba(250,204,21,.12); color: #fde68a; }
+.upcoming .txt { min-width: 0; flex: 1; }
+.upcoming .t { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.upcoming .sub { font-size: 12.5px; color: var(--faint); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.upcoming .amt { flex: none; font-size: 14.5px; font-variant-numeric: tabular-nums; }
+
+/* ---------- totals ---------- */
+.breakdown { margin-top: 14px; display: grid; gap: 7px; font-size: 14px; font-variant-numeric: tabular-nums; }
+.breakdown:empty { display: none; }
+.breakdown .row { display: flex; gap: 10px; align-items: baseline; }
+.breakdown .row .v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c7cdee; }
+.breakdown .row .d { color: var(--faint); font-size: 12.5px; white-space: nowrap; }
+.breakdown .row.sum { border-top: 1px solid var(--line); padding-top: 8px; font-weight: 700; }
+.breakdown .row.sum .v { color: var(--ink); }
+.breakdown .ex { color: var(--faint); font-size: 12.5px; }
+.pill.cat { color: #fbcfe8; border-color: rgba(244,114,182,.3); background: rgba(244,114,182,.08); }
 
 footer { margin-top: 38px; text-align: center; color: var(--faint); font-size: 12.5px; line-height: 1.7; }
 footer .status { display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); background: var(--glass); color: var(--muted); }
@@ -212,6 +237,11 @@ footer a { color: var(--muted); }
   </form>
   <div class="chips" id="chips"></div>
 
+  <section id="upcomingWrap" hidden>
+    <div class="section-h"><h2>Coming up</h2><a class="link-btn" id="calLink" href="/calendar.ics">Add to calendar</a></div>
+    <ul class="upcoming" id="upcoming"></ul>
+  </section>
+
   <section id="result" hidden aria-live="polite">
     <div class="stages" id="stages">
       <span class="stage" data-s="search"><span class="dot"></span><span>Searching</span></span>
@@ -225,11 +255,13 @@ footer a { color: var(--muted); }
         <span class="badge" id="mode"></span>
         <span class="head-actions">
           <button class="icon-btn" id="copyBtn" type="button" title="Copy answer" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>
+          <button class="icon-btn" id="aiBtn" type="button" title="Have the local AI read the documents and answer" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.6L19.5 10l-5.6 1.9L12 17.5l-1.9-5.6L4.5 10l5.6-1.4z"/></svg>Ask the AI</button>
           <button class="icon-btn" id="againBtn" type="button" title="Ask again" hidden><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>Ask again</button>
         </span>
       </div>
       <div class="answer-text" id="answer"></div>
       <div class="facts" id="facts"></div>
+      <div class="breakdown" id="breakdown"></div>
       <div class="note" id="note" hidden></div>
       <div class="meta-line" id="metaLine"></div>
     </article>
@@ -274,7 +306,8 @@ footer a { color: var(--muted); }
     answer: $("#answer"), card: $("#answerCard"), mode: $("#mode"), facts: $("#facts"), note: $("#note"),
     meta: $("#metaLine"), sources: $("#sources"), sourcesWrap: $("#sourcesWrap"), timer: $("#timer"),
     readLabel: $("#readLabel"), recent: $("#recent"), recentWrap: $("#recentWrap"),
-    copyBtn: $("#copyBtn"), againBtn: $("#againBtn"), led: $("#led"), statusText: $("#statusText"),
+    copyBtn: $("#copyBtn"), againBtn: $("#againBtn"), aiBtn: $("#aiBtn"), breakdown: $("#breakdown"),
+    upcoming: $("#upcoming"), upcomingWrap: $("#upcomingWrap"), calLink: $("#calLink"), led: $("#led"), statusText: $("#statusText"),
   };
   let es = null, tick = null, current = null, libSize = null;
 
@@ -362,6 +395,7 @@ footer a { color: var(--muted); }
     els.sources.innerHTML = list.map((s, i) => {
       const pills = [s.created ? `<span class="pill date">${esc(fmtDate(s.created))}</span>` : "",
         s.type ? `<span class="pill type">${esc(s.type)}</span>` : "",
+        s.category ? `<span class="pill cat">${esc(s.category)}</span>` : "",
         s.correspondent ? `<span class="pill">${esc(s.correspondent)}</span>` : "",
         ...(s.tags || []).slice(0, 3).map((t) => `<span class="pill">#${esc(t)}</span>`)].join("");
       return `<a class="card src" id="src-${s.n}" href="${esc(s.url)}" target="_blank" rel="noopener" style="animation-delay:${i * 70}ms">
@@ -392,6 +426,18 @@ footer a { color: var(--muted); }
   });
   function flashBtn(b) { b.style.color = "#a7f3d0"; setTimeout(() => (b.style.color = ""), 1200); }
   els.againBtn.addEventListener("click", () => { if (current) ask(current.q); });
+  els.aiBtn.addEventListener("click", () => { if (current) ask(current.q, true); });
+
+  // ---------- totals ----------
+  const money = (v) => "$" + Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  function renderBreakdown(t) {
+    if (!t) { els.breakdown.innerHTML = ""; return; }
+    const rows = t.items.map((i) => `<div class="row"><a class="cite" href="#src-${i.n}" data-n="${i.n}">${i.n}</a>
+      <span class="v">${esc(i.vendor)}</span><span class="d">${esc(fmtDate(i.date))}</span><span>${money(i.amount)}</span></div>`);
+    if (t.items.length > 1) rows.push(`<div class="row sum"><span class="v">Total</span><span>${money(t.total)}</span></div>`);
+    for (const x of t.excluded || []) rows.push(`<div class="ex">Not counted: <a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title)}</a> ${money(x.amount)}, ${esc(x.reason)}</div>`);
+    els.breakdown.innerHTML = rows.join("");
+  }
 
   function resetView(q) {
     document.body.classList.add("asked");
@@ -400,7 +446,7 @@ footer a { color: var(--muted); }
     els.answer.innerHTML = "";
     els.facts.innerHTML = ""; els.note.hidden = true; els.meta.textContent = "";
     els.sources.innerHTML = ""; els.sourcesWrap.hidden = true;
-    els.copyBtn.hidden = true; els.againBtn.hidden = true;
+    els.copyBtn.hidden = true; els.againBtn.hidden = true; els.aiBtn.hidden = true; els.breakdown.innerHTML = "";
     document.getElementById("stages").hidden = false;
     setMode("", "");
     els.q.value = q; autosize();
@@ -412,8 +458,10 @@ footer a { color: var(--muted); }
     document.getElementById("stages").hidden = true;
     current = x;
     els.answer.innerHTML = renderAnswer(x.a, x.sources);
-    if (x.mode !== "llm") els.answer.classList.add("quick");
+    if (!["llm", "facts", "total"].includes(x.mode)) els.answer.classList.add("quick");
     renderFacts(x.facts);
+    renderBreakdown(x.total);
+    els.aiBtn.hidden = x.mode !== "facts";
     renderSources(x.sources, x.terms);
     setMode("", "Saved answer · " + ago(x.ts));
     if (x.unverified && x.unverified.length) {
@@ -426,7 +474,7 @@ footer a { color: var(--muted); }
 
   function stop() { if (es) { es.close(); es = null; } if (tick) { clearInterval(tick); tick = null; } els.go.classList.remove("busy"); els.card.classList.remove("thinking"); autosize(); }
 
-  function ask(q) {
+  function ask(q, full = false) {
     stop();
     resetView(q);
     els.q.blur();
@@ -440,7 +488,7 @@ footer a { color: var(--muted); }
     const url = new URL(location.href); url.searchParams.set("q", q); history.replaceState(null, "", url);
 
     let buf = "", r = null, done = false;
-    es = new EventSource("/api/ask/stream?q=" + encodeURIComponent(q));
+    es = new EventSource("/api/ask/stream?q=" + encodeURIComponent(q) + (full ? "&full=1" : ""));
     autosize();
     const finish = (mode, d = {}) => {
       done = true;
@@ -458,6 +506,13 @@ footer a { color: var(--muted); }
           setMode("ok", "Local AI · " + secs + "s");
           els.facts.innerHTML = "";
         }
+      } else if ((mode === "facts" || mode === "total") && r) {
+        a = r.extractive.text;
+        els.answer.className = "answer-text";
+        els.answer.innerHTML = renderAnswer(a, sources);
+        renderFacts([]);
+        if (mode === "total") { renderBreakdown(r.total); setMode("ok", "Added up · " + secs + "s"); }
+        else { setMode("ok", "Instant · saved facts"); els.aiBtn.hidden = false; }
       } else {
         a = r ? r.extractive.text : "Something went wrong.";
         els.answer.className = "answer-text quick";
@@ -473,6 +528,7 @@ footer a { color: var(--muted); }
       }
       els.againBtn.hidden = false;
       current = { q, a, mode, ts: Date.now(), unverified: d.unverified || [], facts: r && els.facts.innerHTML ? r.extractive.facts : [], terms: r ? r.highlight : [],
+        total: mode === "total" && r ? r.total : null,
         sources: sources.map(({ n, id, title, headline, created, type, correspondent, tags, snippet, url, thumb }) => ({ n, id, title, headline, created, type, correspondent, tags, snippet, url, thumb })) };
       if (r) remember(current);
     };
@@ -530,13 +586,32 @@ footer a { color: var(--muted); }
       const s = await (await fetch("/api/stats", { cache: "no-store" })).json();
       libSize = s.documents;
       els.led.className = "led " + (s.llm ? "on" : "warn");
-      els.statusText.textContent = `${s.documents} documents · ${s.llm ? "local AI online" : "AI offline — quick answers only"}`;
+      const f = s.facts && s.facts.enabled && s.facts.pending ? ` · ${s.facts.analysed} of ${s.facts.analysed + s.facts.pending} analysed` : "";
+      els.statusText.textContent = `${s.documents} documents · ${s.llm ? "local AI online" : "AI offline — quick answers only"}${f}`;
     } catch {
       els.led.className = "led"; els.statusText.textContent = "Offline";
     }
   }
 
+  // ---------- coming up ----------
+  els.calLink.href = (location.protocol === "https:" ? "https://" : "webcal://") + location.host + "/calendar.ics";
+  async function loadUpcoming() {
+    try {
+      const u = await (await fetch(`/api/upcoming?days=${CONFIG.reminder_days || 60}`, { cache: "no-store" })).json();
+      els.upcomingWrap.hidden = !u.items.length;
+      els.upcoming.innerHTML = u.items.slice(0, 6).map((i) => {
+        const days = i.days_left === 0 ? "Today" : `${i.days_left}<small>day${i.days_left === 1 ? "" : "s"}</small>`;
+        const what = i.label === "due" ? "due" : "expires";
+        return `<li class="${i.days_left <= 3 ? "soon" : ""}"><a href="${esc(i.url)}" target="_blank" rel="noopener">
+          <span class="days">${days}</span>
+          <span class="txt"><div class="t">${esc(i.vendor)} ${what}</div><div class="sub">${esc(fmtDate(i.date))} · ${esc(i.title)}</div></span>
+          ${i.amount ? `<span class="amt">${money(i.amount)}</span>` : ""}</a></li>`;
+      }).join("");
+    } catch { els.upcomingWrap.hidden = true; }
+  }
+
   renderRecent();
+  loadUpcoming(); setInterval(loadUpcoming, 15 * 60000);
   status(); setInterval(status, 60000);
   autosize();
   const initial = new URLSearchParams(location.search).get("q");

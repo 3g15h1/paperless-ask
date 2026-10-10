@@ -6,10 +6,11 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from fake_library import Fake
+from fake_library import DOCS, Fake
 
 
 def make_client(monkeypatch, fake, **env):
+    env.setdefault("FACTS", "off")  # 1.0 behaviour; tests/test_features.py covers fact cards
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     import paperless_ask.app as appmod
@@ -36,7 +37,7 @@ def test_health_and_page(monkeypatch, fake):
     _, c = make_client(monkeypatch, fake)
     with c:
         h = c.get("/healthz").json()
-        assert h["ok"] and h["paperless"]["documents"] == 4 and h["llm"]["ok"]
+        assert h["ok"] and h["paperless"]["documents"] == len(DOCS) and h["llm"]["ok"]
         page = c.get("/").text
         assert "window.PAPERLESS_ASK" in page and "<!--CONFIG-->" not in page
         assert c.get("/manifest.webmanifest").json()["name"] == "Paperless Ask"

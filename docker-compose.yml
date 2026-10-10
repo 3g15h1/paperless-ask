@@ -13,6 +13,8 @@ services:
       PORT: "8000"
     ports:
       - "${PORT:-8000}:8000"
+    volumes:
+      - paperless-ask-data:/data   # fact cards
     depends_on:
       - ollama
 
@@ -32,3 +34,4 @@ services:
 
 volumes:
   ollama:
+  paperless-ask-data:

@@ -23,9 +23,22 @@ leave your network. It runs fine on a CPU-only home server.
 - **Works without the AI.** If Ollama is down or busy, you still get the best-matching passages
   and the key amounts and dates. Questions like "show me / find / list …" return a document
   list straight away without the model.
+- **Coming up.** It finds due and expiry dates in your documents ("Expiration Date: 10/22/2026",
+  "Payment due by …") and lists them on the start page. It also publishes them as a **calendar
+  feed** for your phone and as JSON for **Home Assistant notifications**
+  ([guide](docs/home-assistant.md)). Bills tagged "paid" and cards you've already renewed are
+  left out.
+- **Fact cards and instant answers.** In the background, the model reads each document once and
+  saves its key facts: kind, category, vendor, total, due and expiry dates, and policy or account
+  numbers. A fact is kept only if it can be found in the document's own text. Questions like
+  *"what's my policy number?"* are then answered instantly from the card, and an "Ask the AI"
+  button is there when you want the model's answer instead.
+- **Totals.** *"How much did I spend on medical in 2025?"* adds up the fact cards in code (never
+  by the model). You get the total, an itemised list with citations, and the likely duplicates it
+  left out, such as a receipt and a statement for the same charge.
 - **Read-only.** It only needs a Paperless API token for a view-only user.
 - `http://<host>/?q=…` asks a question straight away, which is handy for phone shortcuts.
-  `POST /api/ask` gives scripts a JSON API.
+  `POST /api/ask` gives scripts a JSON API (`"full": true` skips instant answers).
 
 ## How it works
 
@@ -134,6 +147,10 @@ with explanations.
 | `ASK_PASSWORD` / `ASK_USERNAME` | none / `ask` | Turns on a login (HTTP Basic) |
 | `ASK_SUGGESTIONS` | built-in examples | Example questions, `|`-separated, optional emoji prefix |
 | `ASK_SYNONYMS` | — | Extra search synonyms, e.g. `electric=acmepower; internet=fastnet` |
+| `FACTS` | `on` | Fact cards, instant answers and totals (`off` to disable) |
+| `FACTS_HOURS` | any idle time | Only extract in these hours, e.g. `1-6`. Useful when Ollama is shared |
+| `DATA_DIR` | `./data` (Docker `/data`, systemd `/var/lib/paperless-ask`) | Where fact cards are saved |
+| `REMINDER_DAYS` / `ALERT_DAYS` / `DONE_TAGS` | `60` / `14,3,1,0` / `paid` | "Coming up" window, alert days, tags meaning "already paid" |
 | `HOST` / `PORT` | `0.0.0.0` / `8000` | Where to listen |
 
 **Tips**
@@ -144,6 +161,11 @@ with explanations.
   not the container's limit. On a 2-core container it can run 4+ threads and slow down by up to
   50x. Set `OLLAMA_THREADS` to the number of cores Ollama really has (on the Ollama side,
   `num_thread` does the same).
+- **Fact cards take time on a CPU.** With a 3B model, the first pass takes about 20–45 s per
+  document, done one at a time while nobody is asking questions. Watch progress in the footer or
+  at `/api/facts`. After that, only new and changed documents are read. Totals and instant
+  answers cover the documents analysed so far, and a total tells you if any in its period are
+  still waiting.
 - **One model at a time.** Ollama on a small machine usually keeps one model loaded. If
   Paperless's own AI features use Ollama too, point both at the same model to avoid reloads.
 
@@ -165,7 +187,10 @@ with explanations.
 | `GET /` | The web UI; `/?q=...` asks right away |
 | `GET /api/ask/stream?q=...` | Server-Sent Events: `sources`, `stage`, `token`…, `done` (or `llm_error`/`fatal`) |
 | `POST /api/ask` `{"q": "...", "no_llm": false}` | JSON answer for scripts |
-| `GET /api/stats` | Document count and model status |
+| `GET /api/stats` | Document count, model and fact-card status |
+| `GET /api/upcoming?days=60` | Upcoming due/expiry dates (`items`) and today's `alerts` |
+| `GET /calendar.ics` | The same dates as a subscribable calendar, with alarms |
+| `GET /api/facts` | Every fact card, including what the checks dropped |
 | `GET /healthz` | 200 once the library is loaded, else 503 |
 | `GET /thumb/<id>` | Document thumbnail, proxied from Paperless |
 
@@ -189,6 +214,11 @@ so they need neither.
 - Answers are short (1–3 sentences) and based on the top 3 documents. It's for finding facts,
   not summarising your whole archive.
 - English-oriented: stop words, dates and synonyms assume English documents and questions.
+  Amounts are read and shown in `$1,234.56` style. Other currency formats (`1.234,56 €`) aren't
+  supported in totals yet.
+- Instant answers and totals are only as good as the fact cards. The cards are checked against
+  each document's text, but a model can still put a real number in the wrong field. Each answer
+  cites its source, so you can check it.
 
 ## License
 
