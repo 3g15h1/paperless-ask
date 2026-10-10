@@ -1,0 +1,24 @@
+# systemd unit for a pip install. See README, "Install without Docker".
+[Unit]
+Description=Paperless Ask (natural-language Q&A over Paperless-ngx)
+Documentation=https://github.com/3g15h1/paperless-ask
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=paperless-ask
+Group=paperless-ask
+EnvironmentFile=/etc/paperless-ask/env
+ExecStart=/opt/paperless-ask/venv/bin/paperless-ask
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+Restart=always
+RestartSec=3
+# To listen on a port below 1024 (e.g. PORT=80), also uncomment:
+#AmbientCapabilities=CAP_NET_BIND_SERVICE
+#CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

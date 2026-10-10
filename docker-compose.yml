@@ -1,0 +1,34 @@
+# Paperless Ask + a local Ollama. Usage:
+#   cp .env.example .env    # set PAPERLESS_URL and PAPERLESS_TOKEN
+#   docker compose up -d
+#   docker compose exec ollama ollama pull qwen2.5:3b-instruct   # first run only
+# Already running Ollama elsewhere? Delete the `ollama` service and set OLLAMA_URL in .env.
+services:
+  paperless-ask:
+    image: ghcr.io/3g15h1/paperless-ask:latest
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: "8000"
+    ports:
+      - "${PORT:-8000}:8000"
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    # Uncomment to use an NVIDIA GPU (needs the NVIDIA Container Toolkit):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  ollama:
